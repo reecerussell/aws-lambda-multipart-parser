@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"encoding/base64"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -56,14 +58,38 @@ func (f *FormFile) Read(p []byte) (n int, err error) {
 // Parse parses multipart/form-data from the request body
 // of an API Gateway proxy request. A pointer to an instance of
 // FormData will be returned, containing all data from the request body.
-func Parse(e events.APIGatewayProxyRequest) *FormData {
-	boundary := getBoundary(e)
+//
+// An error will be returned if there is no 'Content-Type' header is not
+// present, or if it contains an unexpected multipart/form-data value.
+//
+// If the request body is base64 encoded, it will be decoded into a string,
+// however, if the body is not valid base64 data, an error will also
+// then be returned.
+//
+// If the all the correct header values are present, but the request body
+// is not in the correct multipart/form-data format, it will panic!
+func Parse(e events.APIGatewayProxyRequest) (*FormData, error) {
+	boundary, err := getBoundary(e)
+	if err != nil {
+		return nil, err
+	}
+
 	data := &FormData{
 		fields: make(map[string]string),
 		files: make(map[string]*FormFile),
 	}
 
-	for _, item := range strings.Split(e.Body, boundary) {
+	body := e.Body
+	if e.IsBase64Encoded {
+		data, err := base64.StdEncoding.DecodeString(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read base64 body: %v", err)
+		}
+
+		body = string(data)
+	}
+
+	for _, item := range strings.Split(body, boundary) {
 		re := regexp.MustCompile("filename=\".+\"")
 		if re.MatchString(item) { // is a file?
 			name, file := readFile(item)
@@ -83,7 +109,7 @@ func Parse(e events.APIGatewayProxyRequest) *FormData {
 		}
 	}
 
-	return data
+	return data, nil
 }
 
 // getBoundary attempts to get the form data boundary from the
@@ -91,7 +117,7 @@ func Parse(e events.APIGatewayProxyRequest) *FormData {
 //
 // Will panic if either the 'Content-Type' header is not present
 // or if it contains an unexpected value.
-func getBoundary(e events.APIGatewayProxyRequest) string {
+func getBoundary(e events.APIGatewayProxyRequest) (string, error) {
 	for k, v := range e.Headers {
 		if strings.ToLower(k) != "content-type" {
 			continue
@@ -99,13 +125,13 @@ func getBoundary(e events.APIGatewayProxyRequest) string {
 
 		parts := strings.Split(v, "=")
 		if len(parts) != 2 {
-			panic("unexpected header value: invalid content type")
+			return "", fmt.Errorf("unexpected header value: invalid content type")
 		}
 
-		return parts[1]
+		return parts[1], nil
 	}
 
-	panic("cannot find boundary: no content-type header")
+	return "", fmt.Errorf("cannot find boundary: no content-type header")
 }
 
 // separates the logic to parse files from the main Parse function.
