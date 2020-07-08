@@ -140,3 +140,17 @@ func TestGetBoundary(t *testing.T) {
 		}
 	})
 }
+
+func BenchmarkParse(b *testing.B) {
+	b.SetBytes(int64(len(testContentType)))
+	e := events.APIGatewayProxyRequest{
+		Headers: map[string]string{
+			"Content-Type": testContentType,
+		},
+		Body: testBody,
+	}
+
+	for i := 0; i < b.N; i++ {
+		_, _ = Parse(e)
+	}
+}
