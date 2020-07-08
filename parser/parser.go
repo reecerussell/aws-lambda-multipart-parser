@@ -40,21 +40,6 @@ type FormFile struct {
 	Content []byte
 }
 
-// Read is an implementation of the io.Reader interface, used
-// to read len(p) bytes from the file's data.
-//
-// An error should never be returned, but it's needed for the interface.
-func (f *FormFile) Read(p []byte) (n int, err error) {
-	l := len(p)
-	if fl := len(f.Content); fl < l {
-		l = fl
-	}
-
-	copy(p, f.Filename[:l])
-
-	return l, nil
-}
-
 // Parse parses multipart/form-data from the request body
 // of an API Gateway proxy request. A pointer to an instance of
 // FormData will be returned, containing all data from the request body.
@@ -119,16 +104,14 @@ func Parse(e events.APIGatewayProxyRequest) (*FormData, error) {
 // or if it contains an unexpected value.
 func getBoundary(e events.APIGatewayProxyRequest) (string, error) {
 	for k, v := range e.Headers {
-		if strings.ToLower(k) != "content-type" {
-			continue
-		}
+		if strings.ToLower(k) == "content-type" {
+			parts := strings.Split(v, "=")
+			if len(parts) != 2 {
+				return "", fmt.Errorf("unexpected header value: invalid content type")
+			}
 
-		parts := strings.Split(v, "=")
-		if len(parts) != 2 {
-			return "", fmt.Errorf("unexpected header value: invalid content type")
+			return parts[1], nil
 		}
-
-		return parts[1], nil
 	}
 
 	return "", fmt.Errorf("cannot find boundary: no content-type header")
@@ -155,7 +138,7 @@ func readFile(item string) (string, *FormFile) {
 	file.ContentType = re.FindString(item)[14:]
 
 	// File data
-	si := re.FindStringIndex(item)[0] + len(re.FindString(item)) + 4
+	si := re.FindStringIndex(item)[0] + len(re.FindString(item)) + 2
 	data := make([]byte, len(item) - 4 - si)
 	copy(data, item[si:len(item)-4])
 	file.Content = data
