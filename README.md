@@ -2,8 +2,6 @@
 
 A simple, lightweight tool to parse multipart/form-data from the body of incoming API Gateway proxy requests.
 
-This is a Golang port of the JavaScript version, https://github.com/myshenin/aws-lambda-multipart-parser.
-
 ## Installation
 
 Simply run this in your CLI:
