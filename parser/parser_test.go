@@ -1,22 +1,20 @@
 package parser
 
 import (
+	"bytes"
 	"encoding/base64"
-	"github.com/aws/aws-lambda-go/events"
+	"image/jpeg"
+	"image/png"
+	"io"
+	"mime/multipart"
+	"os"
 	"testing"
+
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/stretchr/testify/assert"
 )
 
-const testBody = `POST / HTTP/1.1
-Host: localhost:8000
-User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux i686; rv:29.0) Gecko/20100101 Firefox/29.0
-Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
-Accept-Language: en-US,en;q=0.5
-Accept-Encoding: gzip, deflate
-Connection: keep-alive
-Content-Type: multipart/form-data; boundary=---------------------------9051914041544843365972754266
-Content-Length: 554
-
------------------------------9051914041544843365972754266
+const testBody = `-----------------------------9051914041544843365972754266
 Content-Disposition: form-data; name="text"
 
 text default
@@ -24,9 +22,8 @@ text default
 Content-Disposition: form-data; name="file"; filename="file.txt"
 Content-Type: text/plain
 
-Hello World :)
-
------------------------------9051914041544843365972754266`
+Hello World
+-----------------------------9051914041544843365972754266--`
 const testContentType = "multipart/form-data; boundary=---------------------------9051914041544843365972754266"
 
 func TestParse(t *testing.T) {
@@ -68,8 +65,8 @@ func TestParse(t *testing.T) {
 			t.Errorf("Expected content type to be 'text/plain' but got: %s", file.ContentType)
 		}
 
-		if string(file.Content) != "Hello World :)" {
-			t.Errorf("Exepected content to be 'Hello World :)' but got: %s", string(file.Content))
+		if string(file.Content) != "Hello World" {
+			t.Errorf("Exepected content to be 'Hello World' but got: %s", string(file.Content))
 		}
 	}
 }
@@ -77,7 +74,7 @@ func TestParse(t *testing.T) {
 func TestParseWithBase64(t *testing.T) {
 	data := base64.StdEncoding.EncodeToString([]byte(testBody))
 	e := events.APIGatewayProxyRequest{
-		Body: data,
+		Body:            data,
 		IsBase64Encoded: true,
 		Headers: map[string]string{
 			"Content-Type": testContentType,
@@ -91,7 +88,7 @@ func TestParseWithBase64(t *testing.T) {
 
 	t.Run("Invalid Base64 Data", func(t *testing.T) {
 		e := events.APIGatewayProxyRequest{
-			Body: "this isn't base64 data ;)",
+			Body:            "this isn't base64 data ;)",
 			IsBase64Encoded: true,
 			Headers: map[string]string{
 				"Content-Type": testContentType,
@@ -103,6 +100,64 @@ func TestParseWithBase64(t *testing.T) {
 			t.Errorf("expected an error")
 		}
 	})
+}
+
+func TestParse_GivenJPEGFile_BodyIsParsedSuccessfully(t *testing.T) {
+	imageFile, _ := os.Open("../test_data/test_image.jpeg")
+	defer imageFile.Close()
+	buf := &bytes.Buffer{}
+	writer := multipart.NewWriter(buf)
+	fw, _ := writer.CreateFormFile("image", "image.jpeg")
+	io.Copy(fw, imageFile)
+	writer.Close()
+
+	e := events.APIGatewayProxyRequest{
+		Body: buf.String(),
+		Headers: map[string]string{
+			"Content-Type": writer.FormDataContentType(),
+		},
+	}
+
+	data, err := Parse(e)
+	assert.Nil(t, err)
+
+	f, ok := data.File("image")
+	assert.True(t, ok)
+	assert.Equal(t, "image.jpeg", f.Filename)
+	assert.Equal(t, "application/octet-stream", f.ContentType)
+
+	// Assert JPEG can be decoded
+	_, err = jpeg.Decode(f)
+	assert.Nil(t, err)
+}
+
+func TestParse_GivenPNGFile_BodyIsParsedSuccessfully(t *testing.T) {
+	imageFile, _ := os.Open("../test_data/test_image.png")
+	defer imageFile.Close()
+	buf := &bytes.Buffer{}
+	writer := multipart.NewWriter(buf)
+	fw, _ := writer.CreateFormFile("image", "image.png")
+	io.Copy(fw, imageFile)
+	writer.Close()
+
+	e := events.APIGatewayProxyRequest{
+		Body: buf.String(),
+		Headers: map[string]string{
+			"Content-Type": writer.FormDataContentType(),
+		},
+	}
+
+	data, err := Parse(e)
+	assert.Nil(t, err)
+
+	f, ok := data.File("image")
+	assert.True(t, ok)
+	assert.Equal(t, "image.png", f.Filename)
+	assert.Equal(t, "application/octet-stream", f.ContentType)
+
+	// Assert PNG can be decoded
+	_, err = png.Decode(f)
+	assert.Nil(t, err)
 }
 
 func TestGetBoundary(t *testing.T) {

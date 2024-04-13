@@ -3,17 +3,21 @@ package parser
 import (
 	"encoding/base64"
 	"fmt"
-	"regexp"
+	"io"
+	"mime/multipart"
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 )
 
+// The max number of bytes the form data can be - 10mb.
+const MaxFormDataSize = 10 << 20
+
 // FormData is an object which contains all data read from
 // a request body.
 type FormData struct {
 	fields map[string]string
-	files map[string]*FormFile
+	files  map[string]*FormFile
 }
 
 // Get returns the value for a field with the given name.
@@ -34,10 +38,25 @@ func (d *FormData) File(name string) (*FormFile, bool) {
 
 // FormFile represents a file read from a request body.
 type FormFile struct {
-	Type string
-	Filename string
+	// Start index for the Read function
+	startIndex int
+
+	// Obsolete property - will be removed in the next release.
+	Type        string
+	Filename    string
 	ContentType string
-	Content []byte
+	Content     []byte
+}
+
+// Read is used to implement the io.Reader interface, to read the content
+// of the file.
+func (f *FormFile) Read(p []byte) (int, error) {
+	if f.startIndex >= len(f.Content) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.Content[f.startIndex:])
+	f.startIndex += n
+	return n, nil
 }
 
 // Parse parses multipart/form-data from the request body
@@ -54,43 +73,47 @@ type FormFile struct {
 // If the all the correct header values are present, but the request body
 // is not in the correct multipart/form-data format, it will panic!
 func Parse(e events.APIGatewayProxyRequest) (*FormData, error) {
-	boundary, err := getBoundary(e)
-	if err != nil {
-		return nil, err
-	}
-
-	data := &FormData{
-		fields: make(map[string]string),
-		files: make(map[string]*FormFile),
-	}
-
 	body := e.Body
 	if e.IsBase64Encoded {
 		data, err := base64.StdEncoding.DecodeString(body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read base64 body: %v", err)
 		}
-
 		body = string(data)
 	}
+	boundary, err := getBoundary(e)
+	if err != nil {
+		return nil, err
+	}
+	rdr := multipart.NewReader(strings.NewReader(body), boundary)
 
-	for _, item := range strings.Split(body, boundary) {
-		re := regexp.MustCompile("filename=\".+\"")
-		if re.MatchString(item) { // is a file?
-			name, file := readFile(item)
-			data.files[name] = file
-			continue
+	data := &FormData{
+		fields: make(map[string]string),
+		files:  make(map[string]*FormFile),
+	}
+
+	for {
+		part, err := rdr.NextPart()
+		if err == io.EOF {
+			break
 		}
-
-		re = regexp.MustCompile("name=\".+\"")
-		if re.MatchString(item) { // is a field?
-			name := re.FindString(item)
-			name = name[6:len(name)-1]
-
-			si := re.FindStringIndex(item)[0] + len(re.FindString(item)) + 2
-			fi := len(item) - 3
-
-			data.fields[name] = item[si:fi]
+		if err != nil {
+			return nil, err
+		}
+		content, err := io.ReadAll(part)
+		if err != nil {
+			return nil, err
+		}
+		if filename := part.FileName(); filename != "" {
+			data.files[part.FormName()] = &FormFile{
+				startIndex:  0,
+				Type:        "file",
+				Filename:    filename,
+				ContentType: part.Header.Get("Content-Type"),
+				Content:     content,
+			}
+		} else {
+			data.fields[part.FormName()] = string(content)
 		}
 	}
 
@@ -105,7 +128,7 @@ func Parse(e events.APIGatewayProxyRequest) (*FormData, error) {
 func getBoundary(e events.APIGatewayProxyRequest) (string, error) {
 	for k, v := range e.Headers {
 		if strings.ToLower(k) == "content-type" {
-			parts := strings.Split(v, "=")
+			parts := strings.Split(v, "boundary=")
 			if len(parts) != 2 {
 				return "", fmt.Errorf("unexpected header value: invalid content type")
 			}
@@ -115,33 +138,4 @@ func getBoundary(e events.APIGatewayProxyRequest) (string, error) {
 	}
 
 	return "", fmt.Errorf("cannot find boundary: no content-type header")
-}
-
-// separates the logic to parse files from the main Parse function.
-func readFile(item string) (string, *FormFile) {
-	file := &FormFile{
-		Type: "file",
-	}
-
-	// Form name
-	re := regexp.MustCompile("name=\".+\";")
-	name := re.FindString(item)
-	name = name[6:len(name)-2]
-
-	// Filename
-	re = regexp.MustCompile("filename=\".+\"")
-	filename := re.FindString(item)
-	file.Filename = filename[10:len(filename)-1]
-
-	// Content type
-	re = regexp.MustCompile("Content-Type:\\s.+")
-	file.ContentType = re.FindString(item)[14:]
-
-	// File data
-	si := re.FindStringIndex(item)[0] + len(re.FindString(item)) + 2
-	data := make([]byte, len(item) - 4 - si)
-	copy(data, item[si:len(item)-4])
-	file.Content = data
-
-	return name, file
 }
